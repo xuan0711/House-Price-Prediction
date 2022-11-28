@@ -1,0 +1,305 @@
+---
+title: "573 Project R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+library(readr)
+library(glmnet)
+library(tree)
+library(caTools)
+library(class)
+library(caret)
+library(gamlr)
+fullset <- read_csv("fullset.csv")
+
+```
+#FUll set
+```{r}
+x<-model.matrix(SalePrice~., fullset)
+y<-fullset$SalePrice
+```
+
+```{r}
+grid<-10^seq(10,-2,length=100)
+set.seed(1)
+train<-sample(1:nrow(x), nrow(x)*4/5)
+test<-(-train)
+x.train<-x[train,]
+x.test<-x[test,]
+y.train<-y[train]
+y.test<-y[test]
+```
+
+```{r}
+lasso.mod<-glmnet(x.train, y.train, alpha=1, lambda=grid)
+plot(lasso.mod)
+```
+```{r}
+library(gamlr)
+lasso <- cv.gamlr(x=x.train, y=y.train, nfolds=23)
+plot(lasso)
+mat<-coef(lasso, s="1se")
+which(mat[, 1]!=0)
+```
+```{r}
+new_train<-fullset[,c("SalePrice","MSZoning","OverallQual","MasVnrArea","ExterQual",
+                      "BsmtQual","BsmtExposure","BsmtFinSF1","TotalBsmtSF","1stFlrSF",
+                      "GrLivArea","KitchenQual","GarageCars","GarageArea")]
+attach(new_train)
+head(new_train)
+new_train$MSZoning<-as.factor(new_train$MSZoning)
+```
+
+#Split the data
+```{r}
+new_train$SalePrice<-new_train$SalePrice/1000 #Sale Price in thousands
+x<-model.matrix(SalePrice~., new_train)
+y<-new_train$SalePrice
+```
+
+```{r}
+#Split
+grid<-10^seq(10,-2,length=100)
+set.seed(1)
+train<-sample(1:nrow(x), nrow(x)*4/5)
+test<-(-train)
+x.train<-x[train,]
+x.test<-x[test,]
+y.train<-y[train]
+y.test<-y[test]
+```
+
+#Linear Regression
+```{r}
+lm.fit<-lm(SalePrice~., data=new_train[train,])
+summary(lm.fit)
+prediction.lm<-predict(lm.fit, new_train[test,])
+linear<-data.frame(R2=R2(prediction.lm,y.test),
+           MSE=mean((prediction.lm-y.test)^2),
+           MAE=MAE(prediction.lm,y.test),
+           RMSE=RMSE(prediction.lm,y.test))
+```
+#Ridge
+
+```{r}
+ridge.mod<-glmnet(x.train, y.train,alpha=0, lambda = grid, thresh = 1e-12)
+plot(ridge.mod)
+```
+
+```{r}
+set.seed(1)
+cv.out<-cv.glmnet(x.train, y.train, alpha=0)
+plot(cv.out)
+bestlam<-cv.out$lambda.min
+bestlam
+```
+```{r}
+ridge.pred<-predict(ridge.mod, s=bestlam, newx = x.test)
+
+ridge<-data.frame(R2=R2(ridge.pred,y.test),
+           MSE=mean((ridge.pred-y.test)^2),
+           MAE=MAE(ridge.pred,y.test), 
+           RMSE=RMSE(ridge.pred,y.test))
+```
+
+
+
+#Lasso
+```{r}
+lasso.mod<-glmnet(x.train, y.train, alpha=1, lambda=grid)
+plot(lasso.mod)
+```
+```{r}
+set.seed(1)
+cv.out2<-cv.glmnet(x.train, y.train, alpha=1)
+plot(cv.out2)
+bestlam2<-cv.out2$lambda.min
+bestlam2
+lasso.pred<-predict(lasso.mod, s=bestlam2, newx=x.test)
+coef(lasso.mod,)[, 18] #1se
+
+lasso<-data.frame(R2=R2(lasso.pred,y.test),
+           MSE=mean((lasso.pred-y.test)^2),
+           MAE=MAE(lasso.pred,y.test),
+           RMSE=RMSE(lasso.pred,y.test))
+```
+#elastic net
+```{r}
+
+custom <- trainControl(method = "repeatedcv",
+                       number = 10,
+                       repeats = 5,
+                       verboseIter = TRUE)
+en.mod <- train(SalePrice~.,
+            new_train[train,],
+            method='glmnet',
+            tuneGrid =expand.grid(alpha=seq(0,1,length=10),
+                                  lambda = grid),
+            trControl=custom)
+en.mod
+```
+RMSE was used to select the optimal model using the smallest value.
+The final values used for the model were alpha = 0 and lambda = lambda = 8.111308.
+```{r}
+en.pred<-predict(en.mod, new_train[test,])
+en<-data.frame(R2=R2(en.pred,y.test),
+           MSE=mean((en.pred-y.test)^2),
+           MAE=MAE(en.pred,y.test),
+           RMSE=RMSE(en.pred,y.test))
+```
+
+```{r}
+plot(en.mod, main = "Elastic Net Regression")
+plot(plot(varImp(en.mod,scale=TRUE)))
+```
+
+
+#Regression Tree
+```{r}
+set.seed(1)
+new<-setNames(new_train, c("SalePrice", paste0("Var", 1:13) ))
+tree.house<-tree(SalePrice~., new, subset = train)
+summary(tree.house)
+plot(tree.house)
+text(tree.house, pretty=0)
+```
+```{r}
+#pruning the tree to see whether it will improve
+cv.house<-cv.tree(tree.house)
+plot(cv.house$size, cv.house$dev, type="b")
+```
+*In this case, the most complex tree under consideration is selected by cross-validation.*
+```{r}
+tree.pred<-predict(tree.house, newdata=new[-train, ])
+plot(tree.pred, y.test)
+abline(0,1)
+
+tree<-data.frame(R2=R2(tree.pred,y.test),
+           MSE=mean((tree.pred-y.test)^2),
+           MAE=MAE(tree.pred,y.test),
+           RMSE=RMSE(tree.pred,y.test))
+```
+
+
+
+#Random Forests
+*We use a smaller mtry argument.*
+```{r}
+library(randomForest)
+set.seed(1)
+#Bagging
+bag.house<-randomForest(SalePrice~., data=new, subset=train, mtry=13, importance=TRUE)
+bag.pred<-predict(bag.house, newdata=new[-train,])
+
+bag<-data.frame(R2=R2(bag.pred,y.test),
+           MSE=mean((bag.pred-y.test)^2),
+           MAE=MAE(bag.pred,y.test),
+           RMSE=RMSE(bag.pred,y.test))
+#Random Forest
+rf.house<-randomForest(SalePrice~., data=new, subset=train, mtry=6, importance=TRUE)
+rf.pred<-predict(rf.house, newdata=new[-train,])
+
+rf<-data.frame(R2=R2(rf.pred,y.test),
+           MSE=mean((rf.pred-y.test)^2),
+           MAE=MAE(rf.pred,y.test),
+           RMSE=RMSE(rf.pred,y.test))
+```
+```{r}
+par(mfrow=c(1:2))
+importance(bag.house)
+varImpPlot(bag.house)
+importance(rf.house)
+varImpPlot(rf.house)
+```
+*In this case, we could find that Var1 (OverallQual) and Var2(GrLivArea) are the two most important variables.*
+
+
+#Boosting
+```{r}
+library(gbm)
+set.seed(1)
+boost.house<-gbm(SalePrice~.,data=new_train[train,],distribution="gaussian", n.trees=1460, interaction.depth=5)
+```
+```{r}
+summary(boost.house)
+```
+*We see that GrLivArea and OverallQual are the two most important variables.*
+```{r}
+plot(boost.house, i="GrLivArea")
+plot(boost.house, i="OverallQual")
+```
+```{r}
+boost.pred<-predict(boost.house, newdata = new_train[-train,], n.trees=1460)
+
+boost<-data.frame(R2=R2(boost.pred,y.test),
+           MSE=mean((boost.pred-y.test)^2),
+           MAE=MAE(boost.pred,y.test),
+           RMSE=RMSE(boost.pred,y.test))
+```
+
+
+#SVM
+```{r}
+library(e1071)
+svm.house<-svm(SalePrice~.,data=new[train,], kernel="linear", gamma=1, cost=1)
+summary(svm.house)
+```
+
+```{r}
+svm.pred<-predict(svm.house, new[test,])
+
+svm<-data.frame(R2=R2(svm.pred,y.test),
+           MSE=mean((svm.pred-y.test)^2),
+           MAE=MAE(svm.pred,y.test),
+           RMSE=RMSE(svm.pred,y.test))
+```
+```{r}
+L = 1:length(y.test)
+plot(L, y.test, pch=18, col="red")
+lines(L, svm.pred, lwd="1", col="blue")
+grid()
+```
+
+
+#KNN
+```{r}
+set.seed(1)
+#We tried k=2, k=5, k=10, k=20, k=100. 
+#MSE: 1828.6407,1537.2355, 1460.0378, 1513.4958,2145.8789.
+knn.fit<-knnreg(x.train,y.train, k=10)
+
+str(knn.fit)
+```
+```{r}
+knn.pred<-predict(knn.fit,data.frame(x.test))
+
+knn<-data.frame(R2=R2(knn.pred,y.test),
+           MSE=mean((knn.pred-y.test)^2),
+           MAE=MAE(knn.pred,y.test),
+           RMSE=RMSE(knn.pred,y.test))
+```
+```{r}
+#Visualization of KNN: original and predicted Sale Price
+L <- 1:length(y.test)
+plot(L, y.test, col = "red", type = "l", lwd=1,
+     main = "Ames housing test data prediction")
+lines(L, knn.pred, col = "blue", lwd=1)
+legend("topright",  legend = c("original-SalePrice", "predicted-SalePrice"), 
+       fill = c("red", "blue"), col = 2:3,  adj = c(0, 0.6))
+grid()
+```
+```{r}
+collect<-data.frame(
+     method=c("Linear","Ridge","Lasso","Elastic Net","Regression Tree","Bagging","Random Forest","Boosting","SVR","KNN"),
+     R2=c(linear[1,1], ridge[1,1],lasso[1,1],en[1,1],tree[1,1],bag[1,1],rf[1,1], boost[1,1],svm[1,1],knn[1,1]),
+     MSE=c(linear[1,2], ridge[1,2],lasso[1,2],en[1,2],tree[1,2],bag[1,2],rf[1,2], boost[1,2],svm[1,2],knn[1,2]),
+     MAE=c(linear[1,3], ridge[1,3],lasso[1,3],en[1,3],tree[1,3],bag[1,3],rf[1,3], boost[1,3],svm[1,3],knn[1,3]),
+     RMSE=c(linear[1,4], ridge[1,4],lasso[1,4],en[1,4],tree[1,4],bag[1,4],rf[1,4], boost[1,4],svm[1,4],knn[1,4])
+           )
+
+collect
+collect[order(collect$MSE),]
+```
